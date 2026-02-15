@@ -35,6 +35,7 @@ from util.notify import push_deer
 from util.llm_analyzer import LLMAnalyzer  # 导入 LLM 分析器
 
 import piexif
+import subprocess
 
 warnings.filterwarnings("ignore")
 
@@ -48,11 +49,14 @@ logger = logging.getLogger("weibo")
 # 日期时间格式
 DTFORMAT = "%Y-%m-%dT%H:%M:%S"
 
+
 class Weibo(object):
     def __init__(self, config):
         """Weibo类初始化"""
         self.validate_config(config)
-        self.only_crawl_original = config["only_crawl_original"]  # 取值范围为0、1,程序默认值为0,代表要爬取用户的全部微博,1代表只爬取用户的原创微博
+        self.only_crawl_original = config[
+            "only_crawl_original"
+        ]  # 取值范围为0、1,程序默认值为0,代表要爬取用户的全部微博,1代表只爬取用户的原创微博
         self.remove_html_tag = config[
             "remove_html_tag"
         ]  # 取值范围为0、1, 0代表不移除微博中的html tag, 1代表移除
@@ -69,11 +73,15 @@ class Weibo(object):
             logger.error("since_date 格式不正确，请确认配置是否正确")
             sys.exit()
         self.since_date = since_date  # 起始时间，即爬取发布日期从该值到现在的微博，形式为yyyy-mm-ddThh:mm:ss，如：2023-08-21T09:23:03
-        self.start_page = config.get("start_page", 1)  # 开始爬的页，如果中途被限制而结束可以用此定义开始页码
+        self.start_page = config.get(
+            "start_page", 1
+        )  # 开始爬的页，如果中途被限制而结束可以用此定义开始页码
         self.write_mode = config[
             "write_mode"
         ]  # 结果信息保存类型，为list形式，可包含csv、mongo和mysql三种类型
-        self.markdown_split_by = config.get("markdown_split_by", "day") # markdown文件分割方式，day/day_by_month/month/year/all
+        self.markdown_split_by = config.get(
+            "markdown_split_by", "day"
+        )  # markdown文件分割方式，day/day_by_month/month/year/all
         self.original_pic_download = config[
             "original_pic_download"
         ]  # 取值范围为0、1, 0代表不下载原创微博图片,1代表下载
@@ -86,11 +94,13 @@ class Weibo(object):
         self.retweet_video_download = config[
             "retweet_video_download"
         ]  # 取值范围为0、1, 0代表不下载转发微博视频,1代表下载
-        
+
         # 新增Live Photo视频下载配置
-        self.original_live_photo_download = config.get("original_live_photo_download", 0)
+        self.original_live_photo_download = config.get(
+            "original_live_photo_download", 0
+        )
         self.retweet_live_photo_download = config.get("retweet_live_photo_download", 0)
-        
+
         self.download_comment = config["download_comment"]  # 1代表下载评论,0代表不下载
         self.comment_max_download_count = config[
             "comment_max_download_count"
@@ -108,60 +118,66 @@ class Weibo(object):
         self.change_file_time = config.get(
             "change_file_time", 0
         )  # 是否修改文件时间，取值范围为0、1, 0代表不开启, 1代表开启
-        
+
+        self.email_address = config.get("email_address")
+        self.recive_address = config.get("recive_address")
         # Cookie支持：优先使用环境变量WEIBO_COOKIE，其次使用config.json中的配置
         cookie_string = os.environ.get("WEIBO_COOKIE") or config.get("cookie")
         if os.environ.get("WEIBO_COOKIE"):
             logger.info("使用环境变量WEIBO_COOKIE中的Cookie")
-        
-        core_cookies = {}   # 核心包
-        backup_cookies = {} # 备份
+
+        core_cookies = {}  # 核心包
+        backup_cookies = {}  # 备份
         # Cookie清洗：提取核心字段。若后续预热失败，则回退使用原版 _T_WM/XSRF-TOKEN
         if cookie_string and "SUB=" in cookie_string:
             # 1. 提取核心 SUB
-            match_sub = re.search(r'SUB=(.*?)(;|$)', cookie_string)
+            match_sub = re.search(r"SUB=(.*?)(;|$)", cookie_string)
             if match_sub:
-                core_cookies['SUB'] = match_sub.group(1)
-            
+                core_cookies["SUB"] = match_sub.group(1)
+
             # 2. 提取备份指纹
-            match_twm = re.search(r'_T_WM=(.*?)(;|$)', cookie_string)
+            match_twm = re.search(r"_T_WM=(.*?)(;|$)", cookie_string)
             if match_twm:
-                backup_cookies['_T_WM'] = match_twm.group(1)
-            
-            match_xsrf = re.search(r'XSRF-TOKEN=(.*?)(;|$)', cookie_string)
+                backup_cookies["_T_WM"] = match_twm.group(1)
+
+            match_xsrf = re.search(r"XSRF-TOKEN=(.*?)(;|$)", cookie_string)
             if match_xsrf:
-                backup_cookies['XSRF-TOKEN'] = match_xsrf.group(1)
-        
+                backup_cookies["XSRF-TOKEN"] = match_xsrf.group(1)
+
         # 保底：如果没有提取到 SUB，说明格式特殊，全量加载
         if not core_cookies and cookie_string:
-            for pair in cookie_string.split(';'):
-                if '=' in pair:
-                    key, value = pair.split('=', 1)
+            for pair in cookie_string.split(";"):
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
                     core_cookies[key.strip()] = value.strip()
-                    
+
         self.headers = {
-            'Referer': 'https://m.weibo.cn/',  # 修正 Referer 为 m.weibo.cn
-            'accept': 'application/json, text/plain, */*',
-            'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-            'cache-control': 'max-age=0',
-            'priority': 'u=0, i',
-            'sec-ch-ua': '"Chromium";v="136", "Microsoft Edge";v="136", "Not.A/Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
-            'upgrade-insecure-requests': '1',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0',
+            "Referer": "https://m.weibo.cn/",  # 修正 Referer 为 m.weibo.cn
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+            "cache-control": "max-age=0",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Chromium";v="136", "Microsoft Edge";v="136", "Not.A/Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-origin",
+            "upgrade-insecure-requests": "1",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
         }
         self.mysql_config = config.get("mysql_config")  # MySQL数据库连接配置，可以不填
-        self.mongodb_URI = config.get("mongodb_URI")  # MongoDB数据库连接字符串，可以不填
+        self.mongodb_URI = config.get(
+            "mongodb_URI"
+        )  # MongoDB数据库连接字符串，可以不填
         self.post_config = config.get("post_config")  # post_config，可以不填
-        self.page_weibo_count = config.get("page_weibo_count")  # page_weibo_count，爬取一页的微博数，默认10页
-        
+        self.page_weibo_count = config.get(
+            "page_weibo_count"
+        )  # page_weibo_count，爬取一页的微博数，默认10页
+
         # 初始化 LLM 分析器
         self.llm_analyzer = LLMAnalyzer(config) if config.get("llm_config") else None
-        
+
         user_id_list = config["user_id_list"]
         requests_session = requests.Session()
         requests_session.cookies.update(core_cookies)
@@ -172,15 +188,15 @@ class Weibo(object):
             # 服务器下发适配 m.weibo.cn 的新指纹
             self.session.get("https://m.weibo.cn", headers=self.headers, timeout=10)
             logger.info("Session 预热成功，服务器已下发最新指纹。")
-            
+
         except Exception as e:
-            #请求失败时，启用备份
+            # 请求失败时，启用备份
             logger.warning(f"Session 预热失败 ({e})，正在启用备份 Cookie...")
-            self.session.cookies.update(backup_cookies) # 把旧指纹装进去救急
+            self.session.cookies.update(backup_cookies)  # 把旧指纹装进去救急
 
         adapter = HTTPAdapter(max_retries=5)
-        self.session.mount('http://', adapter)
-        self.session.mount('https://', adapter)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
         # 避免卡住
         if isinstance(user_id_list, list):
             random.shuffle(user_id_list)
@@ -215,7 +231,7 @@ class Weibo(object):
         self.got_count = 0  # 存储爬取到的微博数
         self.weibo = []  # 存储爬取到的所有微博信息
         self.weibo_id_list = []  # 存储爬取到的所有微博id
-        self.long_sleep_count_before_each_user = 0 #每个用户前的长时间sleep避免被ban
+        self.long_sleep_count_before_each_user = 0  # 每个用户前的长时间sleep避免被ban
         self.store_binary_in_sqlite = config.get("store_binary_in_sqlite", 0)
 
         # 防封禁配置初始化
@@ -224,13 +240,14 @@ class Weibo(object):
 
         # 爬取状态跟踪
         self.crawl_stats = {
-            "weibo_count": 0,      # 已爬取微博数
-            "request_count": 0,    # 已发送请求数
-            "api_errors": 0,       # API错误数
-            "start_time": None,    # 开始时间
-            "batch_count": 0,      # 当前批次计数
-            "last_batch_time": None # 上次批次时间
+            "weibo_count": 0,  # 已爬取微博数
+            "request_count": 0,  # 已发送请求数
+            "api_errors": 0,  # API错误数
+            "start_time": None,  # 开始时间
+            "batch_count": 0,  # 当前批次计数
+            "last_batch_time": None,  # 上次批次时间
         }
+
     def calculate_dynamic_delay(self):
         """计算动态延迟时间"""
         if not self.anti_ban_enabled:
@@ -303,7 +320,9 @@ class Weibo(object):
 
             # 检查距离上次批次的时间
             if self.crawl_stats["last_batch_time"]:
-                time_since_last_batch = current_time - self.crawl_stats["last_batch_time"]
+                time_since_last_batch = (
+                    current_time - self.crawl_stats["last_batch_time"]
+                )
                 if time_since_last_batch < batch_delay:
                     # 如果距离上次批次时间太短，等待补足
                     wait_time = batch_delay - time_since_last_batch
@@ -325,39 +344,39 @@ class Weibo(object):
         config = self.anti_ban_config
 
         # 随机选择User-Agent
-        user_agents = config.get("user_agents", [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0"
-        ])
+        user_agents = config.get(
+            "user_agents",
+            [
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0"
+            ],
+        )
         user_agent = random.choice(user_agents)
 
         # 随机选择Accept-Language
-        accept_languages = config.get("accept_languages", [
-            "zh-CN,zh;q=0.9,en;q=0.8"
-        ])
+        accept_languages = config.get("accept_languages", ["zh-CN,zh;q=0.9,en;q=0.8"])
         accept_language = random.choice(accept_languages)
 
         # 随机选择Referer
-        referers = config.get("referer_list", [
-            "https://m.weibo.cn/",
-            "https://weibo.com/"
-        ])
+        referers = config.get(
+            "referer_list", ["https://m.weibo.cn/", "https://weibo.com/"]
+        )
         referer = random.choice(referers)
 
         # 返回随机化的请求头
         return {
-            'Referer': referer,
-            'accept': 'application/json, text/plain, */*',
-            'accept-language': accept_language,
-            'cache-control': 'max-age=0',
-            'priority': 'u=0, i',
-            'sec-ch-ua': '"Chromium";v="136", "Microsoft Edge";v="136", "Not.A/Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
-            'upgrade-insecure-requests': '1',
-            'user-agent': user_agent,
+            "Referer": referer,
+            "accept": "application/json, text/plain, */*",
+            "accept-language": accept_language,
+            "cache-control": "max-age=0",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Chromium";v="136", "Microsoft Edge";v="136", "Not.A/Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-origin",
+            "upgrade-insecure-requests": "1",
+            "user-agent": user_agent,
         }
 
     def update_crawl_stats(self, weibo_count=0, request_count=0, api_error=False):
@@ -383,7 +402,7 @@ class Weibo(object):
             "api_errors": 0,
             "start_time": time.time(),
             "batch_count": 0,
-            "last_batch_time": None
+            "last_batch_time": None,
         }
         logger.info("爬取统计已重置，继续爬取")
 
@@ -394,20 +413,22 @@ class Weibo(object):
 
         config = self.anti_ban_config
         rest_time_min = config.get("rest_time_min", 600)
-        
+
         # 添加随机波动（±10%）
         rest_time = int(rest_time_min * random.uniform(0.9, 1.1))
-        
+
         logger.info("┌────────────────────────────────────┐")
         logger.info("│ 🛡️ 防封禁休息中...                 │")
         logger.info("│ 休息时间: %-4d 秒                  │", rest_time)
-        logger.info("│ 预计恢复: %s       │", 
-                   (datetime.now() + timedelta(seconds=rest_time)).strftime("%H:%M:%S"))
+        logger.info(
+            "│ 预计恢复: %s       │",
+            (datetime.now() + timedelta(seconds=rest_time)).strftime("%H:%M:%S"),
+        )
         logger.info("└────────────────────────────────────┘")
-        
+
         # 执行休息
         sleep(rest_time)
-        
+
         logger.info("休息结束，继续爬取微博")
 
     def validate_config(self, config):
@@ -445,18 +466,21 @@ class Weibo(object):
         for mode in config["write_mode"]:
             if mode not in write_mode:
                 logger.warning(
-                    "%s为无效模式，请从csv、json、mongo、mysql、sqlite、post、markdown中挑选一个或多个作为write_mode", mode
+                    "%s为无效模式，请从csv、json、mongo、mysql、sqlite、post、markdown中挑选一个或多个作为write_mode",
+                    mode,
                 )
                 sys.exit()
         # 验证运行模式
         if "sqlite" not in config["write_mode"] and const.MODE == "append":
             logger.warning("append模式下请将sqlite加入write_mode中")
             sys.exit()
-        
+
         # 验证markdown_split_by
         markdown_split_by = config.get("markdown_split_by", "day")
         if markdown_split_by not in ["day", "day_by_month", "month", "year", "all"]:
-            logger.warning("markdown_split_by值应为day、day_by_month、month、year或all,请重新输入")
+            logger.warning(
+                "markdown_split_by值应为day、day_by_month、month、year或all,请重新输入"
+            )
             sys.exit()
 
         # 验证user_id_list
@@ -475,8 +499,14 @@ class Weibo(object):
 
         # 验证since_date
         since_date = config["since_date"]
-        if (not isinstance(since_date, int)) and (not self.is_datetime(since_date)) and (not self.is_date(since_date)):
-            logger.warning("since_date值应为yyyy-mm-dd形式、yyyy-mm-ddTHH:MM:SS形式或整数，请重新输入")
+        if (
+            (not isinstance(since_date, int))
+            and (not self.is_datetime(since_date))
+            and (not self.is_date(since_date))
+        ):
+            logger.warning(
+                "since_date值应为yyyy-mm-dd形式、yyyy-mm-ddTHH:MM:SS形式或整数，请重新输入"
+            )
             sys.exit()
 
         comment_max_count = config["comment_max_download_count"]
@@ -502,7 +532,7 @@ class Weibo(object):
             return True
         except ValueError:
             return False
-    
+
     def is_date(self, since_date):
         """判断日期格式是否为 %Y-%m-%d"""
         try:
@@ -514,7 +544,9 @@ class Weibo(object):
     def get_json(self, params):
         url = "https://m.weibo.cn/api/container/getIndex?"
         try:
-            r = self.session.get(url, params=params, headers=self.headers, verify=False, timeout=10)
+            r = self.session.get(
+                url, params=params, headers=self.headers, verify=False, timeout=10
+            )
             r.raise_for_status()
             response_json = r.json()
             return response_json, r.status_code
@@ -536,25 +568,31 @@ class Weibo(object):
             bool: 如果用户成功完成验证码，返回 True；否则返回 False。
         """
         logger.debug(f"收到的 JSON 数据：{js}")
-        
+
         captcha_url = js.get("url")
         if captcha_url:
             logger.warning("检测到验证码挑战。正在打开验证码页面以供手动验证。")
             webbrowser.open(captcha_url)
         else:
-            logger.warning("检测到可能的验证码挑战，但未提供验证码 URL。请手动检查浏览器并完成验证码验证。")
+            logger.warning(
+                "检测到可能的验证码挑战，但未提供验证码 URL。请手动检查浏览器并完成验证码验证。"
+            )
             return False
-        
+
         logger.info("请在打开的浏览器窗口中完成验证码验证。")
         while True:
             try:
                 # 等待用户输入
-                user_input = input("完成验证码后，请输入 'y' 继续，或输入 'q' 退出：").strip().lower()
+                user_input = (
+                    input("完成验证码后，请输入 'y' 继续，或输入 'q' 退出：")
+                    .strip()
+                    .lower()
+                )
 
-                if user_input == 'y':
+                if user_input == "y":
                     logger.info("用户输入 'y'，继续爬取。")
                     return True
-                elif user_input == 'q':
+                elif user_input == "q":
                     logger.warning("用户选择退出，程序中止。")
                     sys.exit("用户选择退出，程序中止。")
                 else:
@@ -562,7 +600,7 @@ class Weibo(object):
             except EOFError:
                 logger.error("读取用户输入时发生 EOFError，程序退出。")
                 sys.exit("输入流已关闭，程序中止。")
-    
+
     def get_weibo_json(self, page):
         """获取网页中微博json数据"""
         url = "https://m.weibo.cn/api/container/getIndex?"
@@ -592,14 +630,16 @@ class Weibo(object):
                     logger.debug(f"动态延迟: {delay:.1f} 秒")
                     sleep(delay)
 
-                response = self.session.get(url, params=params, headers=current_headers, timeout=10)
+                response = self.session.get(
+                    url, params=params, headers=current_headers, timeout=10
+                )
                 response.raise_for_status()  # 如果响应状态码不是 200，会抛出 HTTPError
                 js = response.json()
 
                 # 更新统计：成功请求
                 self.update_crawl_stats(request_count=1)
 
-                if 'data' in js:
+                if "data" in js:
                     logger.info(f"成功获取到页面 {page} 的数据。")
                     return js
                 else:
@@ -613,22 +653,24 @@ class Weibo(object):
                         sys.exit()
             except RequestException as e:
                 retries += 1
-                sleep_time = backoff_factor * (2 ** retries)
+                sleep_time = backoff_factor * (2**retries)
                 logger.error(f"请求失败，错误信息：{e}。等待 {sleep_time} 秒后重试...")
                 sleep(sleep_time)
                 # 更新统计：API错误
                 self.update_crawl_stats(api_error=True)
             except ValueError as ve:
                 retries += 1
-                sleep_time = backoff_factor * (2 ** retries)
-                logger.error(f"JSON 解码失败，错误信息：{ve}。等待 {sleep_time} 秒后重试...")
+                sleep_time = backoff_factor * (2**retries)
+                logger.error(
+                    f"JSON 解码失败，错误信息：{ve}。等待 {sleep_time} 秒后重试..."
+                )
                 sleep(sleep_time)
                 # 更新统计：API错误
                 self.update_crawl_stats(api_error=True)
 
         logger.error("超过最大重试次数，跳过当前页面。")
         return {}
-    
+
     def user_to_csv(self):
         """将爬取到的用户信息写入csv文件"""
         file_dir = os.path.split(os.path.realpath(__file__))[0] + os.sep + "weibo"
@@ -742,24 +784,28 @@ class Weibo(object):
         """获取用户信息"""
         params = {"containerid": "100505" + str(self.user_config["user_id"])}
         url = "https://m.weibo.cn/api/container/getIndex"
-        
+
         # 这里在读取下一个用户的时候很容易被ban，需要优化休眠时长
         # 加一个count，不需要一上来啥都没干就sleep
         if self.long_sleep_count_before_each_user > 0:
             sleep_time = random.randint(30, 60)
             # 添加log，否则一般用户不知道以为程序卡了
-            logger.info(f"""短暂sleep {sleep_time}秒，避免被ban""")        
+            logger.info(f"""短暂sleep {sleep_time}秒，避免被ban""")
             sleep(sleep_time)
-            logger.info("sleep结束")  
-        self.long_sleep_count_before_each_user = self.long_sleep_count_before_each_user + 1      
+            logger.info("sleep结束")
+        self.long_sleep_count_before_each_user = (
+            self.long_sleep_count_before_each_user + 1
+        )
 
         max_retries = 5  # 设置最大重试次数，避免无限循环
         retries = 0
         backoff_factor = 5  # 指数退避的基数（秒）
-        
+
         while retries < max_retries:
             try:
-                logger.info(f"准备获取ID：{self.user_config['user_id']}的用户信息第{retries+1}次。")
+                logger.info(
+                    f"准备获取ID：{self.user_config['user_id']}的用户信息第{retries + 1}次。"
+                )
 
                 # 防封禁：使用随机请求头
                 current_headers = self.get_random_headers()
@@ -770,22 +816,37 @@ class Weibo(object):
                     logger.debug(f"动态延迟: {delay:.1f} 秒")
                     sleep(delay)
 
-                response = self.session.get(url, params=params, headers=current_headers, timeout=10)
+                response = self.session.get(
+                    url, params=params, headers=current_headers, timeout=10
+                )
                 response.raise_for_status()
                 js = response.json()
 
                 # 更新统计：成功请求
                 self.update_crawl_stats(request_count=1)
-                if 'data' in js and 'userInfo' in js['data']:
+                if "data" in js and "userInfo" in js["data"]:
                     info = js["data"]["userInfo"]
                     user_info = OrderedDict()
                     user_info["id"] = self.user_config["user_id"]
                     user_info["screen_name"] = info.get("screen_name", "")
                     user_info["gender"] = info.get("gender", "")
                     params = {
-                        "containerid": "230283" + str(self.user_config["user_id"]) + "_-_INFO"
+                        "containerid": "230283"
+                        + str(self.user_config["user_id"])
+                        + "_-_INFO"
                     }
-                    zh_list = ["生日", "所在地", "IP属地", "小学", "初中", "高中", "大学", "公司", "注册时间", "阳光信用"]
+                    zh_list = [
+                        "生日",
+                        "所在地",
+                        "IP属地",
+                        "小学",
+                        "初中",
+                        "高中",
+                        "大学",
+                        "公司",
+                        "注册时间",
+                        "阳光信用",
+                    ]
                     en_list = [
                         "birthday",
                         "location",
@@ -816,7 +877,9 @@ class Weibo(object):
                     user_info["followers_count"] = self.string_to_int(
                         info.get("followers_count", 0)
                     )
-                    user_info["follow_count"] = self.string_to_int(info.get("follow_count", 0))
+                    user_info["follow_count"] = self.string_to_int(
+                        info.get("follow_count", 0)
+                    )
                     user_info["description"] = info.get("description", "")
                     user_info["profile_url"] = info.get("profile_url", "")
                     user_info["profile_image_url"] = info.get("profile_image_url", "")
@@ -828,7 +891,9 @@ class Weibo(object):
                     user_info["verified_reason"] = info.get("verified_reason", "")
                     self.user = self.standardize_info(user_info)
                     self.user_to_database()
-                    logger.info(f"成功获取到用户 {self.user_config['user_id']} 的信息。")
+                    logger.info(
+                        f"成功获取到用户 {self.user_config['user_id']} 的信息。"
+                    )
                     return 0
                 elif isinstance(js.get("url"), str) and js.get("url").strip():
                     logger.warning("未能获取到用户信息，可能需要验证码验证。")
@@ -839,7 +904,9 @@ class Weibo(object):
                     else:
                         logger.error("验证码验证失败或未完成，程序将退出。")
                         sys.exit()
-                elif isinstance(js.get("msg"), str) and "这里还没有内容" in js.get("msg"):
+                elif isinstance(js.get("msg"), str) and "这里还没有内容" in js.get(
+                    "msg"
+                ):
                     logger.warning("未能获取到用户信息，可能账号已注销或用户id有误。")
                     return 1
                 else:
@@ -847,15 +914,17 @@ class Weibo(object):
                     return 1
             except RequestException as e:
                 retries += 1
-                sleep_time = backoff_factor * (2 ** retries)
+                sleep_time = backoff_factor * (2**retries)
                 logger.error(f"请求失败，错误信息：{e}。等待 {sleep_time} 秒后重试...")
                 sleep(sleep_time)
                 # 更新统计：API错误
                 self.update_crawl_stats(api_error=True)
             except ValueError as ve:
                 retries += 1
-                sleep_time = backoff_factor * (2 ** retries)
-                logger.error(f"JSON 解码失败，错误信息：{ve}。等待 {sleep_time} 秒后重试...")
+                sleep_time = backoff_factor * (2**retries)
+                logger.error(
+                    f"JSON 解码失败，错误信息：{ve}。等待 {sleep_time} 秒后重试..."
+                )
                 sleep(sleep_time)
                 # 更新统计：API错误
                 self.update_crawl_stats(api_error=True)
@@ -884,33 +953,38 @@ class Weibo(object):
         if weibo_info.get("pics"):
             pic_info = weibo_info["pics"]
             pic_list = [
-                pic['large']['url'] for pic in pic_info
-                if isinstance(pic, dict) and pic.get('large')
+                pic["large"]["url"]
+                for pic in pic_info
+                if isinstance(pic, dict) and pic.get("large")
             ]
             pics = ",".join(pic_list)
         else:
             pics = ""
         return pics
 
-
     def get_live_photo_url(self, weibo_info):
         """获取Live Photo视频URL"""
         live_photo_list = weibo_info.get("live_photo", [])
         return ";".join(live_photo_list) if live_photo_list else ""
+
     def get_video_url(self, weibo_info):
         """获取微博普通视频URL"""
         video_url = ""
         if weibo_info.get("page_info"):
             if weibo_info["page_info"].get("type") == "video":
-                media_info = weibo_info["page_info"].get("urls") or weibo_info["page_info"].get("media_info")
+                media_info = weibo_info["page_info"].get("urls") or weibo_info[
+                    "page_info"
+                ].get("media_info")
                 if media_info:
-                    video_url = (media_info.get("mp4_720p_mp4") or
-                                media_info.get("mp4_hd_url") or
-                                media_info.get("hevc_mp4_hd") or
-                                media_info.get("mp4_sd_url") or
-                                media_info.get("mp4_ld_mp4") or
-                                media_info.get("stream_url_hd") or
-                                media_info.get("stream_url"))
+                    video_url = (
+                        media_info.get("mp4_720p_mp4")
+                        or media_info.get("mp4_hd_url")
+                        or media_info.get("hevc_mp4_hd")
+                        or media_info.get("mp4_sd_url")
+                        or media_info.get("mp4_ld_mp4")
+                        or media_info.get("stream_url_hd")
+                        or media_info.get("stream_url")
+                    )
         return video_url
 
     def write_exif_time(self, file_path, time_str):
@@ -942,19 +1016,18 @@ class Weibo(object):
     def download_one_file(self, url, file_path, type, weibo_id, created_at):
         """下载单个文件(图片/视频)"""
         try:
-
             file_exist = os.path.isfile(file_path)
-            need_download = (not file_exist)
+            need_download = not file_exist
             sqlite_exist = False
             if "sqlite" in self.write_mode:
                 sqlite_exist = self.sqlite_exist_file(file_path)
 
             if not need_download:
-                return 
+                return
 
             s = requests.Session()
-            s.mount('http://', HTTPAdapter(max_retries=5))
-            s.mount('https://', HTTPAdapter(max_retries=5))
+            s.mount("http://", HTTPAdapter(max_retries=5))
+            s.mount("https://", HTTPAdapter(max_retries=5))
             try_count = 0
             success = False
             MAX_TRY_COUNT = 3
@@ -969,55 +1042,74 @@ class Weibo(object):
                     try_count += 1
 
                     # 获取文件后缀
-                    url_path = url.split('?')[0]  # 去除URL中的参数
-                    inferred_extension = os.path.splitext(url_path)[1].lower().strip('.')
+                    url_path = url.split("?")[0]  # 去除URL中的参数
+                    inferred_extension = (
+                        os.path.splitext(url_path)[1].lower().strip(".")
+                    )
 
                     # 通过 Magic Number 检测文件类型
-                    if downloaded.startswith(b'\xFF\xD8\xFF'):
+                    if downloaded.startswith(b"\xff\xd8\xff"):
                         # JPEG 文件
-                        if not downloaded.endswith(b'\xff\xd9'):
-                            logger.debug(f"[DEBUG] JPEG 文件不完整: {url} ({try_count}/{MAX_TRY_COUNT})")
+                        if not downloaded.endswith(b"\xff\xd9"):
+                            logger.debug(
+                                f"[DEBUG] JPEG 文件不完整: {url} ({try_count}/{MAX_TRY_COUNT})"
+                            )
                             continue  # 文件不完整，继续重试
-                        detected_extension = '.jpg'
-                    elif downloaded.startswith(b'\x89PNG\r\n\x1A\n'):
+                        detected_extension = ".jpg"
+                    elif downloaded.startswith(b"\x89PNG\r\n\x1a\n"):
                         # PNG 文件
-                        if not downloaded.endswith(b'IEND\xaeB`\x82'):
-                            logger.debug(f"[DEBUG] PNG 文件不完整: {url} ({try_count}/{MAX_TRY_COUNT})")
+                        if not downloaded.endswith(b"IEND\xaeB`\x82"):
+                            logger.debug(
+                                f"[DEBUG] PNG 文件不完整: {url} ({try_count}/{MAX_TRY_COUNT})"
+                            )
                             continue  # 文件不完整，继续重试
-                        detected_extension = '.png'
+                        detected_extension = ".png"
                     else:
                         # 其他类型，使用原有逻辑处理
-                        if inferred_extension in ['mp4', 'mov', 'webm', 'gif', 'bmp', 'tiff']:
-                            detected_extension = '.' + inferred_extension
+                        if inferred_extension in [
+                            "mp4",
+                            "mov",
+                            "webm",
+                            "gif",
+                            "bmp",
+                            "tiff",
+                        ]:
+                            detected_extension = "." + inferred_extension
                         else:
                             # 尝试从 Content-Type 获取扩展名
-                            content_type = response.headers.get('Content-Type', '').lower()
-                            if 'image/jpeg' in content_type:
-                                detected_extension = '.jpg'
-                            elif 'image/png' in content_type:
-                                detected_extension = '.png'
-                            elif 'video/mp4' in content_type:
-                                detected_extension = '.mp4'
-                            elif 'video/quicktime' in content_type:
-                                detected_extension = '.mov'
-                            elif 'video/webm' in content_type:
-                                detected_extension = '.webm'
-                            elif 'image/gif' in content_type:
-                                detected_extension = '.gif'
+                            content_type = response.headers.get(
+                                "Content-Type", ""
+                            ).lower()
+                            if "image/jpeg" in content_type:
+                                detected_extension = ".jpg"
+                            elif "image/png" in content_type:
+                                detected_extension = ".png"
+                            elif "video/mp4" in content_type:
+                                detected_extension = ".mp4"
+                            elif "video/quicktime" in content_type:
+                                detected_extension = ".mov"
+                            elif "video/webm" in content_type:
+                                detected_extension = ".webm"
+                            elif "image/gif" in content_type:
+                                detected_extension = ".gif"
                             else:
                                 # 使用原有的扩展名，如果无法确定
-                                detected_extension = '.' + inferred_extension if inferred_extension else ''
+                                detected_extension = (
+                                    "." + inferred_extension
+                                    if inferred_extension
+                                    else ""
+                                )
 
                     # 动态调整文件路径的扩展名
                     if detected_extension:
-                        file_path = re.sub(r'\.\w+$', detected_extension, file_path)
+                        file_path = re.sub(r"\.\w+$", detected_extension, file_path)
 
                     # 保存文件
                     if not os.path.isfile(file_path):
                         with open(file_path, "wb") as f:
                             f.write(downloaded)
                             logger.debug("[DEBUG] save " + file_path)
-                        if detected_extension in ['.jpg', '.jpeg']:
+                        if detected_extension in [".jpg", ".jpeg"]:
                             try:
                                 self.write_exif_time(file_path, created_at)
                             except Exception as e:
@@ -1034,8 +1126,10 @@ class Weibo(object):
 
                 except RequestException as e:
                     try_count += 1
-                    logger.error(f"[ERROR] 请求失败，错误信息：{e}。尝试次数：{try_count}/{MAX_TRY_COUNT}")
-                    sleep_time = 2 ** try_count  # 指数退避
+                    logger.error(
+                        f"[ERROR] 请求失败，错误信息：{e}。尝试次数：{try_count}/{MAX_TRY_COUNT}"
+                    )
+                    sleep_time = 2**try_count  # 指数退避
                     sleep(sleep_time)
                 except Exception as e:
                     logger.exception(f"[ERROR] 下载过程中发生错误: {e}")
@@ -1043,9 +1137,7 @@ class Weibo(object):
 
             if success:
                 if "sqlite" in self.write_mode and not sqlite_exist:
-                    self.insert_file_sqlite(
-                        file_path, weibo_id, url, downloaded
-                    )
+                    self.insert_file_sqlite(file_path, weibo_id, url, downloaded)
             else:
                 logger.debug("[DEBUG] failed " + url + " TOTALLY")
                 error_file = self.get_filepath(type) + os.sep + "not_downloaded.txt"
@@ -1112,7 +1204,9 @@ class Weibo(object):
                         file_suffix = url[index:]
                     file_name = file_prefix + "_" + str(i + 1) + file_suffix
                     file_path = file_dir + os.sep + file_name
-                    self.download_one_file(url, file_path, file_type, w["id"], w["created_at"])
+                    self.download_one_file(
+                        url, file_path, file_type, w["id"], w["created_at"]
+                    )
             else:
                 index = urls.rfind(".")
                 if len(urls) - index > 5:
@@ -1121,7 +1215,9 @@ class Weibo(object):
                     file_suffix = urls[index:]
                 file_name = file_prefix + file_suffix
                 file_path = file_dir + os.sep + file_name
-                self.download_one_file(urls, file_path, file_type, w["id"], w["created_at"])
+                self.download_one_file(
+                    urls, file_path, file_type, w["id"], w["created_at"]
+                )
         elif file_type == "video" or file_type == "live_photo":
             file_suffix = ".mp4"
             if ";" in urls:
@@ -1131,13 +1227,17 @@ class Weibo(object):
                         file_suffix = ".mov"
                     file_name = file_prefix + "_" + str(i + 1) + file_suffix
                     file_path = file_dir + os.sep + file_name
-                    self.download_one_file(url, file_path, file_type, w["id"], w["created_at"])
+                    self.download_one_file(
+                        url, file_path, file_type, w["id"], w["created_at"]
+                    )
             else:
                 if urls.endswith(".mov"):
                     file_suffix = ".mov"
                 file_name = file_prefix + file_suffix
                 file_path = file_dir + os.sep + file_name
-                self.download_one_file(urls, file_path, file_type, w["id"], w["created_at"])
+                self.download_one_file(
+                    urls, file_path, file_type, w["id"], w["created_at"]
+                )
 
     def download_files(self, file_type, weibo_type, wrote_count):
         try:
@@ -1153,14 +1253,14 @@ class Weibo(object):
                 key = "live_photo_url"
             else:
                 return
-            
+
             if weibo_type == "original":
                 describe = "原创微博" + describe
             else:
                 describe = "转发微博" + describe
-            
+
             logger.info("即将进行%s下载", describe)
-            
+
             # 检查是否有文件需要下载
             has_files = False
             for w in self.weibo[wrote_count:]:
@@ -1172,15 +1272,18 @@ class Weibo(object):
                 if w.get(key):
                     has_files = True
                     break
-            
+
             if not has_files:
                 logger.info("没有%s需要下载", describe)
                 return
-            
+
             # 对于 markdown 模式下的 day_by_month，按月份分组下载
-            if "markdown" in self.write_mode and self.markdown_split_by == "day_by_month":
+            if (
+                "markdown" in self.write_mode
+                and self.markdown_split_by == "day_by_month"
+            ):
                 base_dir = self.get_filepath("markdown")
-                
+
                 for w in tqdm(self.weibo[wrote_count:], desc="Download progress"):
                     # 对于转发微博，使用父微博的日期确定月份文件夹
                     # 这样转发的内容会与父微博保存在同一个月份目录中
@@ -1192,34 +1295,36 @@ class Weibo(object):
                         month_folder = parent_time_obj.strftime("%Y-%m")
                     except ValueError:
                         continue
-                    
+
                     weibo_data = w
                     if weibo_type == "retweet":
                         if w.get("retweet"):
                             weibo_data = w["retweet"]
                         else:
                             continue
-                    
+
                     if not weibo_data.get(key):
                         continue
-                    
+
                     # 创建月份子目录下的文件目录（使用父微博的月份）
                     month_dir = os.path.join(base_dir, month_folder)
                     file_dir = os.path.join(month_dir, describe)
                     if not os.path.isdir(file_dir):
                         os.makedirs(file_dir)
-                    
-                    self.handle_download(file_type, file_dir, weibo_data.get(key), weibo_data)
-                
+
+                    self.handle_download(
+                        file_type, file_dir, weibo_data.get(key), weibo_data
+                    )
+
                 logger.info("%s下载完毕", describe)
             else:
                 # 原有逻辑：所有文件放在同一目录
                 file_dir = self.get_filepath(file_type)
                 file_dir = file_dir + os.sep + describe
-                
+
                 if not os.path.isdir(file_dir):
                     os.makedirs(file_dir)
-                
+
                 for w in tqdm(self.weibo[wrote_count:], desc="Download progress"):
                     if weibo_type == "retweet":
                         if w.get("retweet"):
@@ -1228,7 +1333,7 @@ class Weibo(object):
                             continue
                     if w.get(key):
                         self.handle_download(file_type, file_dir, w.get(key), w)
-                
+
                 logger.info("%s下载完毕,保存路径:", describe)
                 logger.info(file_dir)
         except Exception as e:
@@ -1349,7 +1454,10 @@ class Weibo(object):
             # 若text_list中的某个字符串元素以 @ 或 # 开始，则将该元素与前后元素合并为新元素，否则会带来没有必要的换行
             text_list_modified = []
             for ele in range(len(text_list)):
-                if ele > 0 and (text_list[ele-1].startswith(('@','#')) or text_list[ele].startswith(('@','#'))):
+                if ele > 0 and (
+                    text_list[ele - 1].startswith(("@", "#"))
+                    or text_list[ele].startswith(("@", "#"))
+                ):
                     text_list_modified[-1] += text_list[ele]
                 else:
                     text_list_modified.append(text_list[ele])
@@ -1359,7 +1467,9 @@ class Weibo(object):
         weibo["article_url"] = self.get_article_url(selector)
         weibo["pics"] = self.get_pics(weibo_info)
         weibo["video_url"] = self.get_video_url(weibo_info)  # 普通视频URL
-        weibo["live_photo_url"] = self.get_live_photo_url(weibo_info)  # Live Photo视频URL
+        weibo["live_photo_url"] = self.get_live_photo_url(
+            weibo_info
+        )  # Live Photo视频URL
         weibo["location"] = self.get_location(selector)
         weibo["created_at"] = weibo_info["created_at"]
         weibo["source"] = weibo_info["source"]
@@ -1372,11 +1482,13 @@ class Weibo(object):
         weibo["reposts_count"] = self.string_to_int(weibo_info.get("reposts_count", 0))
         weibo["topics"] = self.get_topics(selector)
         weibo["at_users"] = self.get_at_users(selector)
-        
+
         # 使用 LLM 分析微博内容
         if self.llm_analyzer:
             weibo = self.llm_analyzer.analyze_weibo(weibo)
-            logger.info("完整分析结果：\n%s", json.dumps(weibo, ensure_ascii=False, indent=2))
+            logger.info(
+                "完整分析结果：\n%s", json.dumps(weibo, ensure_ascii=False, indent=2)
+            )
         return self.standardize_info(weibo)
 
     def print_user_info(self):
@@ -1389,7 +1501,7 @@ class Weibo(object):
         logger.info("性别：%s", gender)
         logger.info("生日：%s", self.user["birthday"])
         logger.info("所在地：%s", self.user["location"])
-        logger.info("IP属地：%s", self.user.get("ip_location", "未获取"))        
+        logger.info("IP属地：%s", self.user.get("ip_location", "未获取"))
         logger.info("教育经历：%s", self.user["education"])
         logger.info("公司：%s", self.user["company"])
         logger.info("阳光信用：%s", self.user["sunshine"])
@@ -1417,7 +1529,11 @@ class Weibo(object):
             logger.info("转发数：%d", weibo["reposts_count"])
             logger.info("话题：%s", weibo["topics"])
             logger.info("@用户：%s", weibo["at_users"])
-            logger.info("已编辑，编辑次数：%d" % weibo.get("edit_count", 0) if weibo.get("edited") else "未编辑")            
+            logger.info(
+                "已编辑，编辑次数：%d" % weibo.get("edit_count", 0)
+                if weibo.get("edited")
+                else "未编辑"
+            )
             logger.info("url：https://m.weibo.cn/detail/%d", weibo["id"])
         except OSError:
             pass
@@ -1488,9 +1604,7 @@ class Weibo(object):
         if weibo["comments_count"] == 0:
             return
 
-        logger.info(
-            "正在下载评论 微博id:{id}".format(id=weibo["id"])
-        )
+        logger.info("正在下载评论 微博id:{id}".format(id=weibo["id"]))
         self._get_weibo_comments_cookie(weibo, 0, max_count, None, on_downloaded)
 
     def get_weibo_reposts(self, weibo, max_count, on_downloaded):
@@ -1502,9 +1616,7 @@ class Weibo(object):
         if weibo["reposts_count"] == 0:
             return
 
-        logger.info(
-            "正在下载转发 微博id:{id}".format(id=weibo["id"])
-        )
+        logger.info("正在下载转发 微博id:{id}".format(id=weibo["id"]))
         self._get_weibo_reposts_cookie(weibo, 0, max_count, 1, on_downloaded)
 
     def _get_weibo_comments_cookie(
@@ -1652,9 +1764,7 @@ class Weibo(object):
         try:
             json = req.json()
         except Exception as e:
-            logger.warning(
-                "未能抓取完整转发 微博id: {id}".format(id=id)
-            )
+            logger.warning("未能抓取完整转发 微博id: {id}".format(id=id))
             return
 
         data = json.get("data")
@@ -1685,21 +1795,19 @@ class Weibo(object):
             return
         self._get_weibo_reposts_cookie(weibo, cur_count, max_count, page, on_downloaded)
 
-
-
     def get_one_page(self, page):
         """获取一页的全部微博"""
         try:
             js = self.get_weibo_json(page)
             if js["ok"]:
                 weibos = js["data"]["cards"]
-                
+
                 if self.query:
                     weibos = weibos[0]["card_group"]
                 # 如果需要检查cookie，在循环第一个人的时候，就要看看仅自己可见的信息有没有，要是没有直接报错
                 for w in weibos:
                     if w["card_type"] == 11:
-                        temp = w.get("card_group",[0])
+                        temp = w.get("card_group", [0])
                         if len(temp) >= 1:
                             w = temp[0] or w
                         else:
@@ -1765,10 +1873,14 @@ class Weibo(object):
                                 # 检查是否为置顶微博
                                 is_pinned = w.get("mblog", {}).get("mblogtype", 0) == 2
                                 if is_pinned:
-                                    logger.debug(f"[置顶微博] 微博ID={wb['id']}, 发布时间={created_at}, 是置顶微博，跳过但继续检查后续微博")
+                                    logger.debug(
+                                        f"[置顶微博] 微博ID={wb['id']}, 发布时间={created_at}, 是置顶微博，跳过但继续检查后续微博"
+                                    )
                                     continue
-                                
-                                logger.debug(f"[日期过滤] 微博ID={wb['id']}, 发布时间={created_at}, 起始时间={since_date}, 被跳过")
+
+                                logger.debug(
+                                    f"[日期过滤] 微博ID={wb['id']}, 发布时间={created_at}, 起始时间={since_date}, 被跳过"
+                                )
                                 # 如果要检查还没有检查cookie，不能直接跳出
                                 if const.CHECK_COOKIE["CHECK"] and (
                                     not const.CHECK_COOKIE["CHECKED"]
@@ -1789,8 +1901,12 @@ class Weibo(object):
                                     )
                                     return True
                             else:
-                                logger.debug(f"[日期通过] 微博ID={wb['id']}, 发布时间={created_at}, 起始时间={since_date}")
-                            if (not self.only_crawl_original) or ("retweet" not in wb.keys()):
+                                logger.debug(
+                                    f"[日期通过] 微博ID={wb['id']}, 发布时间={created_at}, 起始时间={since_date}"
+                                )
+                            if (not self.only_crawl_original) or (
+                                "retweet" not in wb.keys()
+                            ):
                                 self.weibo.append(wb)
                                 self.weibo_id_list.append(wb["id"])
                                 self.got_count += 1
@@ -1814,7 +1930,7 @@ class Weibo(object):
                                 # self.print_weibo(wb)
                             else:
                                 logger.info("正在过滤转发微博")
-                    
+
                 if const.CHECK_COOKIE["CHECK"] and not const.CHECK_COOKIE["CHECKED"]:
                     logger.warning("经检查，cookie无效，系统退出")
                     if const.NOTIFY["NOTIFY"]:
@@ -1837,7 +1953,9 @@ class Weibo(object):
             page_weibo_count = self.page_weibo_count
             page_count = int(math.ceil(weibo_count / page_weibo_count))
             if not isinstance(page_weibo_count, int):
-                raise ValueError("config.json中每页爬取的微博数 page_weibo_count 必须是一个整数")
+                raise ValueError(
+                    "config.json中每页爬取的微博数 page_weibo_count 必须是一个整数"
+                )
             return page_count
         except KeyError:
             logger.exception(
@@ -1904,7 +2022,9 @@ class Weibo(object):
             elif type == "markdown":
                 # 对于markdown类型，返回目录路径，文件名会在generate_markdown_file中指定
                 return file_dir
-            file_path = file_dir + os.sep + str(self.user_config["user_id"]) + "." + type
+            file_path = (
+                file_dir + os.sep + str(self.user_config["user_id"]) + "." + type
+            )
             return file_path
         except Exception as e:
             logger.exception(e)
@@ -1929,7 +2049,7 @@ class Weibo(object):
             "@用户",
             "完整日期",
             "是否编辑过",
-            "编辑次数",            
+            "编辑次数",
         ]
         if not self.only_crawl_original:
             result_headers2 = ["是否原创", "源用户id", "源用户昵称"]
@@ -1959,7 +2079,6 @@ class Weibo(object):
                     writer.writerows([headers])
                 writer.writerows(result_data)
         else:  # python3.x
-
             with open(file_path, "a", encoding="utf-8-sig", newline="") as f:
                 writer = csv.writer(f)
                 if is_first_write:
@@ -2010,10 +2129,12 @@ class Weibo(object):
         logger.info("%d条微博写入json文件完毕,保存路径:", self.got_count)
         logger.info(path)
 
-    def send_post_request_with_token(self, url, data, token, max_retries, backoff_factor):
+    def send_post_request_with_token(
+        self, url, data, token, max_retries, backoff_factor
+    ):
         headers = {
-            'Content-Type': 'application/json',
-            'api-token': f'{token}',
+            "Content-Type": "application/json",
+            "api-token": f"{token}",
         }
         for attempt in range(max_retries + 1):
             try:
@@ -2021,10 +2142,14 @@ class Weibo(object):
                 if response.status_code == requests.codes.ok:
                     return response.json()
                 else:
-                    raise RequestException(f"Unexpected response status: {response.status_code}")
+                    raise RequestException(
+                        f"Unexpected response status: {response.status_code}"
+                    )
             except RequestException as e:
                 if attempt < max_retries:
-                    sleep(backoff_factor * (attempt + 1))  # 逐步增加等待时间，避免频繁重试
+                    sleep(
+                        backoff_factor * (attempt + 1)
+                    )  # 逐步增加等待时间，避免频繁重试
                     continue
                 else:
                     logger.error(f"在尝试{max_retries}次发出POST连接后，请求失败：{e}")
@@ -2032,26 +2157,33 @@ class Weibo(object):
     def write_post(self, wrote_count):
         """将爬到的信息通过POST发出"""
         data = {}
-        data['user'] = self.user
+        data["user"] = self.user
         weibo_info = self.weibo[wrote_count:]
-        if data.get('weibo'):
-            data['weibo'] += weibo_info
+        if data.get("weibo"):
+            data["weibo"] += weibo_info
         else:
-            data['weibo'] = weibo_info
+            data["weibo"] = weibo_info
 
         if data:
-            self.send_post_request_with_token(self.post_config["api_url"], data, self.post_config["api_token"], 3, 2)
-            logger.info(u'%d条微博通过POST发送到 %s', len(data['weibo']), self.post_config["api_url"])
+            self.send_post_request_with_token(
+                self.post_config["api_url"], data, self.post_config["api_token"], 3, 2
+            )
+            logger.info(
+                "%d条微博通过POST发送到 %s",
+                len(data["weibo"]),
+                self.post_config["api_url"],
+            )
         else:
-            logger.info(u'没有获取到微博，略过API POST')
-
+            logger.info("没有获取到微博，略过API POST")
 
     def info_to_mongodb(self, collection, info_list):
         """将爬取的信息写入MongoDB数据库"""
         try:
             import pymongo
         except ImportError:
-            logger.warning("系统中可能没有安装pymongo库，请先运行 pip install pymongo ，再运行程序")
+            logger.warning(
+                "系统中可能没有安装pymongo库，请先运行 pip install pymongo ，再运行程序"
+            )
             sys.exit()
         try:
             from pymongo import MongoClient
@@ -2069,7 +2201,9 @@ class Weibo(object):
                 else:
                     collection.update_one({"id": info["id"]}, {"$set": info})
         except pymongo.errors.ServerSelectionTimeoutError:
-            logger.warning("系统中可能没有安装或启动MongoDB数据库，请先根据系统环境安装或启动MongoDB，再运行程序")
+            logger.warning(
+                "系统中可能没有安装或启动MongoDB数据库，请先根据系统环境安装或启动MongoDB，再运行程序"
+            )
             sys.exit()
 
     def weibo_to_mongodb(self, wrote_count):
@@ -2090,7 +2224,9 @@ class Weibo(object):
         try:
             import pymysql
         except ImportError:
-            logger.warning("系统中可能没有安装pymysql库，请先运行 pip install pymysql ，再运行程序")
+            logger.warning(
+                "系统中可能没有安装pymysql库，请先运行 pip install pymysql ，再运行程序"
+            )
             sys.exit()
         try:
             if self.mysql_config:
@@ -2098,7 +2234,9 @@ class Weibo(object):
             connection = pymysql.connect(**mysql_config)
             self.mysql_create(connection, sql)
         except pymysql.OperationalError:
-            logger.warning("系统中可能没有安装或正确配置MySQL数据库，请先根据系统环境安装或配置MySQL，再运行程序")
+            logger.warning(
+                "系统中可能没有安装或正确配置MySQL数据库，请先根据系统环境安装或配置MySQL，再运行程序"
+            )
             sys.exit()
 
     def mysql_create_table(self, mysql_config, sql):
@@ -2394,10 +2532,12 @@ class Weibo(object):
             "user_avatar_url", "avatar_hd", sqlite_comment, comment["user"]
         )
         if self.remove_html_tag:
-            sqlite_comment["text"] = re.sub('<[^<]+?>', '', comment["text"]).replace('\n', '').strip()
+            sqlite_comment["text"] = (
+                re.sub("<[^<]+?>", "", comment["text"]).replace("\n", "").strip()
+            )
         else:
             sqlite_comment["text"] = comment["text"]
-        
+
         sqlite_comment["pic_url"] = ""
         if comment.get("pic"):
             sqlite_comment["pic_url"] = comment["pic"]["large"]["url"]
@@ -2524,7 +2664,7 @@ class Weibo(object):
         sqlite_user["follow_count"] = user["follow_count"]
         sqlite_user["birthday"] = user["birthday"]
         sqlite_user["location"] = user["location"]
-        sqlite_user["ip_location"] = user.get("ip_location", "")         
+        sqlite_user["ip_location"] = user.get("ip_location", "")
         sqlite_user["edu"] = user["education"]
         sqlite_user["company"] = user["company"]
         sqlite_user["reg_date"] = user["registration_time"]
@@ -2540,9 +2680,7 @@ class Weibo(object):
         keys = ",".join(data.keys())
         values = ",".join(["?"] * len(data))
         sql = """INSERT OR REPLACE INTO {table}({keys}) VALUES({values})
-                """.format(
-            table=table, keys=keys, values=values
-        )
+                """.format(table=table, keys=keys, values=values)
         cur.execute(sql, list(data.values()))
         con.commit()
 
@@ -2659,7 +2797,10 @@ class Weibo(object):
                 lines = f.read().splitlines()
                 lines = [line.decode("utf-8-sig") for line in lines]
             except UnicodeDecodeError:
-                logger.error("%s文件应为utf-8编码，请先将文件编码转为utf-8再运行程序", user_config_file_path)
+                logger.error(
+                    "%s文件应为utf-8编码，请先将文件编码转为utf-8再运行程序",
+                    user_config_file_path,
+                )
                 sys.exit()
             for i, line in enumerate(lines):
                 info = line.split(" ")
@@ -2704,7 +2845,7 @@ class Weibo(object):
             # 解析日期
             try:
                 date_obj = datetime.strptime(created_at, DTFORMAT)
-                
+
                 if self.markdown_split_by in ["day", "day_by_month"]:
                     group_key = date_obj.strftime("%Y-%m-%d")
                 elif self.markdown_split_by == "month":
@@ -2729,7 +2870,7 @@ class Weibo(object):
         """为Markdown格式下载图片，使用指定的命名规则"""
         # 获取用户目录
         file_dir = self.get_filepath("markdown")
-        
+
         # 对于 day_by_month 模式，按月分组图片
         if self.markdown_split_by == "day_by_month":
             # 按月分组微博，然后为每个月创建img目录
@@ -2742,12 +2883,12 @@ class Weibo(object):
                     month_folder = time_obj.strftime("%Y-%m")
                 except ValueError:
                     continue
-                
+
                 month_dir = os.path.join(file_dir, month_folder)
                 img_dir = os.path.join(month_dir, "img")
                 if not os.path.isdir(img_dir):
                     os.makedirs(img_dir)
-                
+
                 # 处理原创微博图片
                 if w.get("pics"):
                     self._download_weibo_images(w, img_dir, is_retweet=False)
@@ -2798,7 +2939,7 @@ class Weibo(object):
             # 如果同一条微博有多张图片，在文件名后加 _1, _2 等后缀
             base_filename = f"{date_str}_{time_str.replace(':', '-')}"
             if len(pics) > 1:
-                img_filename = f"{base_filename}_{i+1}.jpg"
+                img_filename = f"{base_filename}_{i + 1}.jpg"
             else:
                 img_filename = f"{base_filename}.jpg"
 
@@ -2814,20 +2955,22 @@ class Weibo(object):
 
         # 创建markdown文件路径
         if self.markdown_split_by == "all":
-             md_file_path = os.path.join(file_dir, f"{self.user.get('screen_name', 'weibo')}.md")
-             title_date = "全量"
+            md_file_path = os.path.join(
+                file_dir, f"{self.user.get('screen_name', 'weibo')}.md"
+            )
+            title_date = "全量"
         elif self.markdown_split_by == "day_by_month":
-             # 按天分割，但按月归档到子文件夹
-             # group_key 格式为 YYYY-MM-DD
-             month_folder = group_key[:7]  # 提取 YYYY-MM
-             month_dir = os.path.join(file_dir, month_folder)
-             if not os.path.isdir(month_dir):
-                 os.makedirs(month_dir)
-             md_file_path = os.path.join(month_dir, f"{group_key}.md")
-             title_date = group_key
+            # 按天分割，但按月归档到子文件夹
+            # group_key 格式为 YYYY-MM-DD
+            month_folder = group_key[:7]  # 提取 YYYY-MM
+            month_dir = os.path.join(file_dir, month_folder)
+            if not os.path.isdir(month_dir):
+                os.makedirs(month_dir)
+            md_file_path = os.path.join(month_dir, f"{group_key}.md")
+            title_date = group_key
         else:
-             md_file_path = os.path.join(file_dir, f"{group_key}.md")
-             title_date = group_key
+            md_file_path = os.path.join(file_dir, f"{group_key}.md")
+            title_date = group_key
 
         # 获取用户名
         username = self.user.get("screen_name", "未知用户")
@@ -2843,7 +2986,9 @@ class Weibo(object):
                     weibo_id_pattern = r"<!-- weibo_id: (\d+) -->"
                     matches = re.findall(weibo_id_pattern, existing_content)
                     existing_weibo_ids = set(matches)
-                logger.info(f"已读取现有MD文件，包含 {len(existing_weibo_ids)} 条微博记录")
+                logger.info(
+                    f"已读取现有MD文件，包含 {len(existing_weibo_ids)} 条微博记录"
+                )
             except Exception as e:
                 logger.warning(f"读取现有MD文件失败: {e}，将创建新文件")
                 existing_content = ""
@@ -2882,7 +3027,7 @@ class Weibo(object):
                     heading_time = f"{date_str} {time_str}"
             except ValueError:
                 time_str = "00:00:00"
-                date_str = created_at # fallback
+                date_str = created_at  # fallback
                 heading_time = created_at
 
             # 添加时间标题和微博ID（用于增量模式去重）
@@ -2908,7 +3053,9 @@ class Weibo(object):
                     # 使用转发微博的时间作为文件名
                     retweet_created_at = retweet.get("created_at", created_at)
                     try:
-                        retweet_time_obj = datetime.strptime(retweet_created_at, DTFORMAT)
+                        retweet_time_obj = datetime.strptime(
+                            retweet_created_at, DTFORMAT
+                        )
                         retweet_date_str = retweet_time_obj.strftime("%Y-%m-%d")
                         retweet_time_str = retweet_time_obj.strftime("%H:%M:%S")
                     except ValueError:
@@ -2919,7 +3066,7 @@ class Weibo(object):
                         if pic_url:
                             base_filename = f"{retweet_date_str}_{retweet_time_str.replace(':', '-')}"
                             if len(pics) > 1:
-                                img_filename = f"{base_filename}_{i+1}.jpg"
+                                img_filename = f"{base_filename}_{i + 1}.jpg"
                             else:
                                 img_filename = f"{base_filename}.jpg"
                             new_md_content += f"![image](img/{img_filename})\n\n"
@@ -2936,7 +3083,7 @@ class Weibo(object):
                         if pic_url:
                             base_filename = f"{date_str}_{time_str.replace(':', '-')}"
                             if len(pics) > 1:
-                                img_filename = f"{base_filename}_{i+1}.jpg"
+                                img_filename = f"{base_filename}_{i + 1}.jpg"
                             else:
                                 img_filename = f"{base_filename}.jpg"
                             new_md_content += f"![image](img/{img_filename})\n\n"
@@ -2951,11 +3098,15 @@ class Weibo(object):
                 final_content = existing_content.rstrip() + "\n\n" + new_md_content
             else:
                 # 创建新文件，添加标题
-                final_content = f"## {title_date} [{username}] 微博存档\n\n" + new_md_content
+                final_content = (
+                    f"## {title_date} [{username}] 微博存档\n\n" + new_md_content
+                )
 
             with open(md_file_path, "w", encoding="utf-8") as f:
                 f.write(final_content)
-            logger.info(f"Markdown文件已更新: {md_file_path}，新增 {len(new_weibo_list)} 条微博")
+            logger.info(
+                f"Markdown文件已更新: {md_file_path}，新增 {len(new_weibo_list)} 条微博"
+            )
         except Exception as e:
             logger.error(f"生成Markdown文件失败: {e}")
 
@@ -3008,11 +3159,21 @@ class Weibo(object):
                 cfg = self.anti_ban_config
                 logger.info("🛡️ 防封禁模式已启用")
                 logger.info("┌────────────────────────────────────┐")
-                logger.info("│ 每会话最大微博数: %-17d│", cfg['max_weibo_per_session'])
-                logger.info("│ 批次大小: %-8d 批次延迟: %3d秒 │", cfg['batch_size'], cfg['batch_delay'])
-                logger.info("│ 请求延迟: %d-%d秒                   │", cfg['request_delay_min'], cfg['request_delay_max'])
-                logger.info("│ 最大会话时间: %-7d秒            │", cfg['max_session_time'])
-                logger.info("│ 最大API错误数: %-20d│", cfg['max_api_errors'])
+                logger.info("│ 每会话最大微博数: %-17d│", cfg["max_weibo_per_session"])
+                logger.info(
+                    "│ 批次大小: %-8d 批次延迟: %3d秒 │",
+                    cfg["batch_size"],
+                    cfg["batch_delay"],
+                )
+                logger.info(
+                    "│ 请求延迟: %d-%d秒                   │",
+                    cfg["request_delay_min"],
+                    cfg["request_delay_max"],
+                )
+                logger.info(
+                    "│ 最大会话时间: %-7d秒            │", cfg["max_session_time"]
+                )
+                logger.info("│ 最大API错误数: %-20d│", cfg["max_api_errors"])
                 logger.info("└────────────────────────────────────┘")
 
             if const.MODE == "append" and (
@@ -3022,7 +3183,7 @@ class Weibo(object):
                 self.first_crawler = True
             since_date = datetime.strptime(self.user_config["since_date"], DTFORMAT)
             today = datetime.today()
-            if since_date <= today:    # since_date 若为未来则无需执行
+            if since_date <= today:  # since_date 若为未来则无需执行
                 page_count = self.get_page_count()
                 wrote_count = 0
                 page1 = 0
@@ -3031,20 +3192,20 @@ class Weibo(object):
                 pages = range(self.start_page, page_count + 1)
                 for page in tqdm(pages, desc="Progress"):
                     is_end = self.get_one_page(page)
-                    
+
                     # 防封禁：检查是否需要休息
                     if is_end == "need_rest":
                         # 先写入已爬取的数据
                         self.write_data(wrote_count)
                         wrote_count = self.got_count
-                        
+
                         # 执行休息
                         self.perform_anti_ban_rest()
-                        
+
                         # 重置统计，继续爬取
                         self.reset_crawl_stats()
                         continue
-                    
+
                     if is_end:
                         break
 
@@ -3076,7 +3237,9 @@ class Weibo(object):
             # 防封禁：输出统计信息
             if self.anti_ban_enabled:
                 session_time = time.time() - self.crawl_stats["start_time"]
-                logger.info(f"防封禁统计: 微博={self.crawl_stats['weibo_count']}, 请求={self.crawl_stats['request_count']}, 错误={self.crawl_stats['api_errors']}, 耗时={int(session_time)}秒")
+                logger.info(
+                    f"防封禁统计: 微博={self.crawl_stats['weibo_count']}, 请求={self.crawl_stats['request_count']}, 错误={self.crawl_stats['api_errors']}, 耗时={int(session_time)}秒"
+                )
 
             logger.info("微博爬取完成，共爬取%d条微博", self.got_count)
         except Exception as e:
@@ -3086,15 +3249,17 @@ class Weibo(object):
         """获取文件中的微博id信息"""
         with open(file_path, "rb") as f:
             try:
-                lines = f.read().splitlines() 
+                lines = f.read().splitlines()
                 lines = [line.decode("utf-8-sig") for line in lines]
             except UnicodeDecodeError:
-                logger.error("%s文件应为utf-8编码，请先将文件编码转为utf-8再运行程序", file_path)
+                logger.error(
+                    "%s文件应为utf-8编码，请先将文件编码转为utf-8再运行程序", file_path
+                )
                 sys.exit()
             user_config_list = []
             # 分行解析配置，添加到user_config_list
             for line in lines:
-                info = line.strip().split(" ")    # 去除字符串首尾空白字符
+                info = line.strip().split(" ")  # 去除字符串首尾空白字符
                 if len(info) > 0 and info[0].isdigit():
                     user_config = {}
                     user_config["user_id"] = info[0]
@@ -3110,11 +3275,15 @@ class Weibo(object):
                         else:
                             logger.error("since_date 格式不正确，请确认配置是否正确")
                             sys.exit()
-                        logger.info(f"用户 {user_config['user_id']} 使用文件中的起始时间: {user_config['since_date']}")
+                        logger.info(
+                            f"用户 {user_config['user_id']} 使用文件中的起始时间: {user_config['since_date']}"
+                        )
                     else:
                         user_config["since_date"] = self.since_date
-                        logger.info(f"用户 {user_config['user_id']} 使用配置文件的起始时间: {user_config['since_date']}")
-                    # 若超过3个字段，则第四个字段为 query_list                    
+                        logger.info(
+                            f"用户 {user_config['user_id']} 使用配置文件的起始时间: {user_config['since_date']}"
+                        )
+                    # 若超过3个字段，则第四个字段为 query_list
                     if len(info) > 3:
                         user_config["query_list"] = info[3].split(",")
                     else:
@@ -3154,11 +3323,75 @@ class Weibo(object):
         except Exception as e:
             logger.exception(e)
 
+        print(self.email_address)
+
+    def get_system_hash(self, text):
+        """调用 Linux 的 sha256sum 命令计算哈希"""
+        # 模拟: echo "text" | sha256sum
+        try:
+            process = subprocess.Popen(
+                ["sha256sum"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                encoding="utf-8",
+            )
+            stdout, _ = process.communicate(input=text.strip())
+            # sha256sum 输出格式为: [hash]  -
+            return stdout.split()[0]
+        except Exception as e:
+            logger.info(f"调用 sha256sum 失败: {e}")
+            return None
+
+    def content_check(self):
+        # 1. 获取最新微博内容
+        JSON_PATH = "./weibo/7618923072/7618923072.json"
+        HASH_PATH = "./checkhash"
+        os.makedirs(os.path.dirname(HASH_PATH), exist_ok=True)
+
+        try:
+            with open(JSON_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # 拿到原始文本并去除两端空格/换行
+                raw_content = data["weibo"][-1]["text"].strip()
+                if not raw_content:
+                    return
+
+                current_hash = self.get_system_hash(raw_content)
+        except Exception as e:
+            logger.error(f"解析 JSON 失败: {e}")
+            return
+
+        old_hash = ""
+        if os.path.exists(HASH_PATH):
+            with open(HASH_PATH, "r", encoding="utf-8") as f:
+                old_hash = f.read().strip()
+
+        if current_hash != old_hash:
+            with open(HASH_PATH, "w", encoding="utf-8") as f:
+                f.write(current_hash)
+
+            logger.info(f"检测到新动态 (Hash: {current_hash[:8]}...)，正在发信...")
+            self.send_via_msmtp(raw_content)
+        else:
+            logger.info("哈希校验一致，内容未变化。")
+
+    def send_via_msmtp(self, content):
+        """直接调用 msmtp 发送邮件"""
+        mail_data = (
+            f"To: {self.recive_address}\n"
+            f"Subject: {'Weibo Crawler'}\n"
+            f"Content-Type: text/plain; charset=UTF-8\n"
+            f"\n"
+            f"{content}"
+        )
+        subprocess.run(["msmtp", "-t"], input=mail_data, encoding="utf-8")
+
 
 def handle_config_renaming(config, oldName, newName):
     if oldName in config and newName not in config:
         config[newName] = config[oldName]
         del config[oldName]
+
 
 def get_config():
     """获取配置文件信息（支持JSON5格式）"""
@@ -3187,13 +3420,18 @@ def get_config():
                     sys.exit()
 
             # 重命名一些key, 但向前兼容
-            handle_config_renaming(config, oldName="filter", newName="only_crawl_original")
-            handle_config_renaming(config, oldName="result_dir_name", newName="user_id_as_folder_name")
+            handle_config_renaming(
+                config, oldName="filter", newName="only_crawl_original"
+            )
+            handle_config_renaming(
+                config, oldName="result_dir_name", newName="user_id_as_folder_name"
+            )
             return config
     except Exception as e:
         logger.error(f"读取配置文件失败: {e}")
         logger.error("请确保config.json存在且格式正确")
         sys.exit()
+
 
 def main():
     try:
@@ -3202,63 +3440,12 @@ def main():
         wb.start()  # 爬取微博信息
         if const.NOTIFY["NOTIFY"]:
             push_deer("更新了一次微博")
+        wb.content_check()
     except Exception as e:
         if const.NOTIFY["NOTIFY"]:
             push_deer("weibo-crawler运行出错，错误为{}".format(e))
         logger.exception(e)
-    content_check()
 
-import subprocess
-def get_system_hash(text):
-    """调用 Linux 的 sha256sum 命令计算哈希"""
-    # 模拟: echo "text" | sha256sum
-    try:
-        process = subprocess.Popen(
-            ['sha256sum'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            encoding='utf-8'
-        )
-        stdout, _ = process.communicate(input=text.strip())
-        # sha256sum 输出格式为: [hash]  -
-        return stdout.split()[0]
-    except Exception as e:
-        print(f"调用 sha256sum 失败: {e}")
-        return None
-
-
-def content_check():
-    # 1. 获取最新微博内容
-    JSON_PATH='./weibo/7618923072/7618923072.json'
-    HASH_PATH='./hashcheck'
-    os.makedirs(os.path.dirname(HASH_PATH), exist_ok=True)
-
-    try:
-        with open(JSON_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            # 拿到原始文本并去除两端空格/换行
-            raw_content = data['weibo'][-1]['text'].strip()
-            if not raw_content:
-                return
-
-            current_hash = get_system_hash(raw_content)
-    except Exception as e:
-        print(f"解析 JSON 失败: {e}")
-        return
-
-    old_hash = ""
-    if os.path.exists(HASH_PATH):
-        with open(HASH_PATH, 'r', encoding='utf-8') as f:
-            old_hash = f.read().strip()
-
-    if current_hash != old_hash:
-        with open(HASH_PATH, 'w', encoding='utf-8') as f:
-            f.write(current_hash)
-
-        #print(f"检测到新动态 (Hash: {current_hash[:8]}...)，正在发信...")
-        #send_via_msmtp(raw_content)
-    else:
-        print("哈希校验一致，内容未变化。")
 
 if __name__ == "__main__":
     main()
