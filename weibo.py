@@ -3195,7 +3195,6 @@ def get_config():
         logger.error("请确保config.json存在且格式正确")
         sys.exit()
 
-
 def main():
     try:
         config = get_config()
@@ -3207,7 +3206,59 @@ def main():
         if const.NOTIFY["NOTIFY"]:
             push_deer("weibo-crawler运行出错，错误为{}".format(e))
         logger.exception(e)
+    content_check()
 
+import subprocess
+def get_system_hash(text):
+    """调用 Linux 的 sha256sum 命令计算哈希"""
+    # 模拟: echo "text" | sha256sum
+    try:
+        process = subprocess.Popen(
+            ['sha256sum'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding='utf-8'
+        )
+        stdout, _ = process.communicate(input=text.strip())
+        # sha256sum 输出格式为: [hash]  -
+        return stdout.split()[0]
+    except Exception as e:
+        print(f"调用 sha256sum 失败: {e}")
+        return None
+
+
+def content_check():
+    # 1. 获取最新微博内容
+    JSON_PATH='./weibo/7618923072/7618923072.json'
+    HASH_PATH='./hashcheck'
+    os.makedirs(os.path.dirname(HASH_PATH), exist_ok=True)
+
+    try:
+        with open(JSON_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            # 拿到原始文本并去除两端空格/换行
+            raw_content = data['weibo'][-1]['text'].strip()
+            if not raw_content:
+                return
+
+            current_hash = get_system_hash(raw_content)
+    except Exception as e:
+        print(f"解析 JSON 失败: {e}")
+        return
+
+    old_hash = ""
+    if os.path.exists(HASH_PATH):
+        with open(HASH_PATH, 'r', encoding='utf-8') as f:
+            old_hash = f.read().strip()
+
+    if current_hash != old_hash:
+        with open(HASH_PATH, 'w', encoding='utf-8') as f:
+            f.write(current_hash)
+
+        #print(f"检测到新动态 (Hash: {current_hash[:8]}...)，正在发信...")
+        #send_via_msmtp(raw_content)
+    else:
+        print("哈希校验一致，内容未变化。")
 
 if __name__ == "__main__":
     main()
