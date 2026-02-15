@@ -3323,8 +3323,6 @@ class Weibo(object):
         except Exception as e:
             logger.exception(e)
 
-        print(self.email_address)
-
     def get_system_hash(self, text):
         """调用 Linux 的 sha256sum 命令计算哈希"""
         # 模拟: echo "text" | sha256sum
